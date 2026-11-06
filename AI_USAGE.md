@@ -133,3 +133,70 @@ The AI found three issues in its own first draft and edited `DESIGN.md`:
 - Candidate check: I read `DESIGN.md` in full, focusing on the assumptions (A4, A5, A7), the
   service boundary, the promotion rule and its example, the API results table, and the tradeoffs,
   and decided each design choice above. No code exists yet; these rules become test cases in Step 4.
+
+---
+
+## Entry 4 — Core service implementation
+
+**Activity:** Code generation from the accepted design.
+
+**Prompt (condensed):**
+> Step 3: implement the core service exactly as `DESIGN.md` specifies. Pure, synchronous domain
+> functions for enroll, drop, and promotion; a thin async service that serialises calls with a
+> per-offering mutex and saves only on change; in-memory store and learner directory behind async
+> interfaces. Typed result codes, no thrown business errors. No tests yet (Step 4), but show a
+> manual run of the main flows.
+
+**AI response (summary):**
+- `src/types.ts`: state, eligibility, and result types as TypeScript discriminated unions.
+- `src/offering.ts`: `createOfferingState`, `normalizeLearnerId`, `promote`, `enroll`, `drop`.
+  Pure functions; input state is never mutated; each returns `{ result, state, changed }`.
+- `src/mutex.ts`: promise-chain mutex; a failed task does not block later ones.
+- `src/store.ts`: `OfferingStore` and `LearnerDirectory` interfaces with in-memory
+  implementations. Both yield to the event loop (`setImmediate`) like real I/O and return deep
+  copies.
+- `src/enrollment-service.ts`: `create`, `enroll`, `drop`, `snapshot`. Each call runs under the
+  mutex as load → prefetch eligibility → domain → save-if-changed.
+- Small choices made while coding, beyond what `DESIGN.md` states:
+  - `enroll`/`drop` accept `unknown` so non-string IDs from untrusted callers become
+    `INVALID_REQUEST` instead of a crash.
+  - `DROPPED.promoted` lists everyone promoted during the call, including any start-of-call promotion.
+  - Duplicate prerequisite codes in the configuration are de-duplicated.
+  - The lock lives on the service instance, so the code assumes one instance per offering
+    (stated in a code comment; to be listed under limitations).
+
+**Decisions:**
+| Suggestion | Decision | Notes |
+|---|---|---|
+| Implementation as described | **Accepted** | `promote` matches the skip-and-keep policy: it scans the waitlist in FIFO order, promotes eligible learners until seats are filled, and skips ineligible learners without removing them. Their relative order is preserved, so they can still get a seat when they become eligible later. |
+| a. Non-string IDs return `INVALID_REQUEST` | **Accepted** | Handled safely by `normalizeLearnerId` instead of crashing. |
+| b. `DROPPED.promoted` lists all promotions in the call | **Accepted** | Includes promotions both before and after the seat is released. |
+| c. Duplicate prerequisite codes de-duplicated | **Accepted** | Done with a `Set`; avoids redundant checks. |
+| d. One service instance per offering | **Accepted, with follow-up** | Reasonable because the mutex is instance-level. Must be stated explicitly in `README.md` limitations (Step 6). |
+
+**Files informed:** `src/types.ts`, `src/offering.ts`, `src/mutex.ts`, `src/store.ts`,
+`src/enrollment-service.ts`, `src/index.ts`.
+
+**Verification:**
+- `npm run build`: type-check passes under strict settings.
+- Manual walkthrough (capacity 2, prerequisite CS101), output checked line by line against `DESIGN.md`:
+  ```
+  enroll alice               ENROLLED                                 enrolled=alice
+  enroll alice again         ALREADY_ENROLLED                         enrolled=alice
+  enroll cara (no prereq)    PREREQUISITE_NOT_MET missing=[CS101]     enrolled=alice
+  enroll bob                 ENROLLED                                 enrolled=alice,bob
+  enroll dan (full)          WAITLISTED position=1                    waitlist=dan
+  enroll eve (full)          WAITLISTED position=2                    waitlist=dan,eve
+  -- dan's record loses CS101 --
+  drop alice                 DROPPED promoted=[eve]                   enrolled=bob,eve  waitlist=dan
+  drop alice again           NOT_ENROLLED                             (unchanged)
+  drop "   "                 INVALID_REQUEST                          (unchanged)
+  enroll ghost               LEARNER_NOT_FOUND                        (unchanged)
+  -- dan's record regains CS101 --
+  drop bob                   DROPPED promoted=[dan]                   enrolled=eve,dan  waitlist=
+  ```
+  Dan was skipped while ineligible but kept their place, then was promoted when eligible (policy A5).
+- The AI's first walkthrough attempt failed for a tooling reason (`tsx -e` does not support
+  top-level `await`). It was re-run inside an async function, with no code change.
+- Candidate check: I read `src/offering.ts`, comparing `promote` against the pseudocode in
+  `DESIGN.md` §6, and ran `npm run build` myself (no errors). Decided each choice above.
