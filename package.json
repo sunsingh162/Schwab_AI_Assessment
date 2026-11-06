@@ -10,7 +10,9 @@
   "scripts": {
     "build": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "demo": "tsx src/cli.ts",
+    "cli": "tsx src/cli.ts --interactive"
   },
   "repository": {
     "type": "git",

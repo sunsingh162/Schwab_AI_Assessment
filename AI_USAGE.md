@@ -268,3 +268,60 @@ The AI found three issues in its own first draft and edited `DESIGN.md`:
     skipped waiters from the queue. Tests failed as expected. Restored the line; 42 passed again.
     (The AI reproduced the same edit afterwards for the record: 6 failed, 36 passed; restored,
     42 passed, `src/` unchanged.)
+
+---
+
+## Entry 6 — Concurrency test and command-line demo
+
+**Activity:** Concurrency testing (with proof the test detects races), CLI prototype.
+
+**Prompt (condensed):**
+> Step 5: add a focused concurrency test that fires many requests at once and proves the mutex
+> prevents overbooking, duplicate records, and double promotion. Then temporarily disable the lock
+> and show the same tests fail, so we know they detect the race. Also add a small CLI: a scripted
+> demo of the main rules and an interactive shell a reviewer can try. No frontend.
+
+**AI response (summary):**
+- `tests/concurrency.test.ts`, 5 tests using `Promise.all`:
+  - 50 learners race for 5 seats: exactly 5 `ENROLLED`, 45 `WAITLISTED`, positions 1–45 each issued once.
+  - Concurrent calls are served in arrival order, so the waitlist is FIFO by call order.
+  - Same learner sends 10 concurrent enrolls: 1 record.
+  - Same drop sent 10 times concurrently: 1 `DROPPED`, 1 promotion.
+  - Mixed concurrent enrolls and drops: every learner accounted for; invariants hold.
+- `src/cli.ts` with `npm run demo` (scripted walkthrough) and `npm run cli` (interactive:
+  `enroll`, `drop`, `learner <id> [courses]`, `show`, `help`, `quit`).
+
+**Decisions:**
+| Suggestion | Decision | Notes |
+|---|---|---|
+| Concurrency tests as described | **Accepted** | Based on my own lock-disabled run (see Verification). |
+| CLI demo and interactive shell | **Accepted** | Based on running both myself (see Verification). |
+
+**Files informed:** `tests/concurrency.test.ts`, `src/cli.ts`, `package.json` (`demo`, `cli` scripts).
+
+**Verification:**
+- With the lock: 5/5 concurrency tests pass; full suite 47 passed; type-check clean.
+- **Lock disabled** (`src/mutex.ts` changed to run each task immediately, then restored with
+  `git checkout`): **all 5 concurrency tests fail**. Key failures:
+  ```
+  expected [ { status: 'ENROLLED' }, …(49) ] to have a length of 5 but got 50   ← 50 enrolled in 5 seats
+  expected [ { status: 'ENROLLED' }, …(9) ] to have a length of 1 but got 10    ← duplicate records
+  expected [ { status: 'DROPPED', …(1) }, …(9) ] to deeply equal [ …one… ]       ← double drop
+  ```
+  After restoring: 47 passed, `src/` unchanged. This shows the async store really does interleave
+  operations, and that the mutex is what prevents it.
+- **AI bug found in its own CLI and fixed:** the first interactive version used `rl.question()`,
+  which crashed with `ERR_USE_AFTER_CLOSE` when commands were piped in (buffered lines were lost).
+  Rewritten to iterate input lines with `for await`; re-tested with piped commands, including an
+  unknown command and a repeated drop, and `quit` stops input processing.
+- `npm run demo` output matches the Step 3 walkthrough and `DESIGN.md`.
+- Candidate check:
+  - Ran `npm test` myself: 3 files, 47 passed.
+  - Disabled the lock myself (`const run = task();` in `src/mutex.ts`) and ran the concurrency
+    tests: all 5 failed. Reverted the line: all tests passed again.
+  - Ran `npm run demo` and read the output: skip-and-retain behaves as designed (dan skipped while
+    ineligible, kept first place, promoted after regaining CS101).
+  - Ran `npm run cli` interactively: `enroll slice` (a typo) correctly returned `LEARNER_NOT_FOUND`
+    with no state change; cara was rejected for a missing prerequisite, enrolled after
+    `learner cara CS101`; dropping a non-enrolled learner returned `NOT_ENROLLED`; `show` and
+    `quit` worked.
