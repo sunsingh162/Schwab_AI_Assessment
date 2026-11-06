@@ -200,3 +200,71 @@ The AI found three issues in its own first draft and edited `DESIGN.md`:
   top-level `await`). It was re-run inside an async function, with no code change.
 - Candidate check: I read `src/offering.ts`, comparing `promote` against the pseudocode in
   `DESIGN.md` §6, and ran `npm run build` myself (no errors). Decided each choice above.
+
+---
+
+## Entry 5 — Automated tests
+
+**Activity:** Test design and generation; test-quality check with deliberately planted bugs.
+
+**Prompt (condensed):**
+> Step 4: write focused tests for every item in acceptance criterion 6 (available capacity, full
+> capacity, duplicate requests, FIFO promotion, prerequisite failure, invalid and repeated drops),
+> grouped by acceptance criterion. Cover the edge cases `DESIGN.md` calls out for the
+> skip-and-retain policy. Check the §5 invariants after every operation, not only the return
+> values. Then prove the tests can fail: plant realistic bugs one at a time and confirm each is
+> caught. (The concurrency test is Step 5.)
+
+**AI response (summary):**
+- `tests/helpers.ts`: `setup()` builds a service with an in-memory directory whose records tests
+  can change. `expectInvariants()` asserts I1 (capacity), I2 (no duplicates), and I5 (no idle
+  seat while an eligible learner waits) against a snapshot. It runs inside tests and again
+  automatically after every service test.
+- `tests/enrollment-service.test.ts`: 30 acceptance tests grouped AC1–AC5.
+- `tests/offering.test.ts`: 12 unit tests for the pure domain: configuration validation,
+  `promote` order, and purity (inputs are deep-frozen, so any mutation throws).
+- Removed the Step 1 placeholder test.
+
+**Coverage map (acceptance criterion 6 → tests):**
+| Required by brief | Tests |
+|---|---|
+| Available capacity | AC1 (2 tests) |
+| Full capacity | AC2 "waitlists an eligible learner when full…"; AC4 "also rejects an ineligible learner when the offering is full" |
+| Duplicate requests | AC2 enrolled/waitlisted duplicates, including a whitespace-padded ID |
+| FIFO promotion | AC3 (4 tests); `promote` unit tests |
+| Prerequisite failure | AC4 (10 tests), covering both sides of the skip-and-retain policy |
+| Invalid or repeated drops | AC5 repeated drop, never-enrolled drop, 6 kinds of invalid ID, directory failure |
+
+**Decisions:**
+| Suggestion | Decision | Notes |
+|---|---|---|
+| Tests as described | **Accepted** | Reviewed the two key skip-and-retain tests. (1) "skips a waiter who became ineligible…": l2 becomes ineligible, l3 is promoted when l1 drops, and l2 stays at the front, so both the skip and the retained position are tested. (2) "gives an open seat to a waiter who became eligible before a newcomer": l2 becomes eligible again and is promoted during the newcomer's enroll call, and the newcomer is waitlisted, proving promotion runs before a new enrollment is handled. |
+| Planting bugs to check the tests can fail | **Accepted** | Repeated it myself with a bug of my own (below). |
+
+**Files informed:** `tests/helpers.ts`, `tests/enrollment-service.test.ts`, `tests/offering.test.ts`.
+
+**Verification:**
+- `npm test`: 42 passed (2 files). `npm run build`: no type errors.
+- All 42 passed on the first run, so passing alone did not prove much. Six realistic bugs were
+  planted in `src/offering.ts` one at a time, the suite was run, and the file was restored with
+  `git checkout`:
+
+  | Planted bug | Result |
+  |---|---|
+  | 1. `promote` ignores eligibility | caught: 5 failed |
+  | 2. Skip-and-**remove** instead of skip-and-retain | caught: 3 failed |
+  | 3. No duplicate-waitlist check | caught: 3 failed |
+  | 4. No promotion after a drop | caught: 4 failed |
+  | 5. No start-of-call promotion in `enroll` | caught: 2 failed |
+  | 6. Capacity off-by-one (`<=` instead of `<`) | caught: 18 failed |
+
+  After restoring: 42 passed; `git status` shows `src/` unchanged.
+- The AI tidied one of its own drafts before running: a test used a dynamic `import()` where a
+  normal import was correct.
+- Candidate check:
+  - Ran `npx vitest run --reporter=verbose` myself: 42 passed, grouped AC1–AC5.
+  - Read the AC4 skip-and-retain tests and confirmed they test what their names say (see Decisions).
+  - Planted my own bug: commented out `remaining.push(learnerId)` in `promote`, which silently drops
+    skipped waiters from the queue. Tests failed as expected. Restored the line; 42 passed again.
+    (The AI reproduced the same edit afterwards for the record: 6 failed, 36 passed; restored,
+    42 passed, `src/` unchanged.)
