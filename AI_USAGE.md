@@ -325,3 +325,86 @@ The AI found three issues in its own first draft and edited `DESIGN.md`:
     with no state change; cara was rejected for a missing prerequisite, enrolled after
     `learner cara CS101`; dropping a non-enrolled learner returned `NOT_ENROLLED`; `show` and
     `quit` worked.
+
+---
+
+## Entry 7 — Independent review, fixes, and final documentation
+
+**Activity:** Code review by a separate AI reviewer, bug fixing, regression tests, documentation.
+
+**Prompt to the reviewer (condensed):**
+> You are a skeptical senior reviewer. Read-only. Here is the brief and its acceptance criteria.
+> Read `DESIGN.md`, `src/`, and `tests/`, and run the tests and type-check. Find correctness bugs
+> (overbooking, duplicates, broken FIFO, promoting an ineligible learner, state corrupted by a
+> rejected or failed request), with a script that reproduces each one. Also find code/design
+> mismatches, missing tests, over-engineering, and limitations worth stating. No praise.
+
+The reviewer was a fresh AI agent that saw the brief and the code, but none of the earlier
+conversation, so its review was not anchored on the original author's reasoning.
+
+**Reviewer findings and decisions:**
+| # | Finding | AI recommendation | My decision |
+|---|---|---|---|
+| 1 | **Bug:** the lock belonged to each service instance, not to the offering. Two instances on one store both returned `ENROLLED` for 1 seat; one learner silently had no seat. `DESIGN.md` said "per-offering". | Share one lock per offering; add a two-instance test. | **Accepted.** The mutex is instance-level, so two services can race on the same store and overbook. Use a shared lock keyed by offering ID and add a two-instance concurrency test. |
+| 2 | **Misleading result:** a waiter who dropped at a moment when a promotion pass would seat them got `DROPPED, promoted: [self]`. | Remove the waiter before the promotion pass. | **Edited:** handle waitlist removal before promotion, **but only after validating the ID**, so a waiter is never promoted and then given a confusing result. |
+| 3 | Every request looked up every waiter, even when full; one failing waiter lookup blocked everything. | Skip waiter lookups when no seat can open; document the rest. | **Accepted.** Avoid prefetching waiter eligibility when no seat is open. Document that a directory outage during promotion can block operations that need eligibility checks. |
+| 4 | `create()` silently ignores a different config for an existing offering. | Document only. | **Accepted.** Document that `create()` does not update an existing offering's capacity or prerequisites. |
+| 5 | A rejected request can still save a pending promotion. | Keep; explain in README. | **Accepted.** Keep start-of-call promotions even when the request is rejected. Explain it in the README as deliberate, invariant-preserving behaviour. |
+| 6 | Test gaps (two instances, waiter drop, lookup failure during drop, unknown waiter, ineligible waiter leaving, exact order in the mixed concurrency test, combined promotions). | Add them. | **Accepted.** They cover meaningful edge cases, especially directory failures and ordering under concurrency. |
+| 7 | A lot of layers for one offering. | Keep; justify in README. | **Accepted.** Keep the layers: the async store and service boundary make the concurrency behaviour realistic and testable. |
+| 8 | Nits: I3 wording, `build` is only a type-check, prerequisite codes not trimmed. | Fix wording, rename script, skip trimming. | **Accepted.** Clarify I3, rename `build` to `typecheck`, and leave prerequisite trimming out of scope because codes are configuration data. |
+
+**Before fixing, the AI reproduced findings 1 and 2 itself** rather than trusting the report:
+```
+F1 two instances, capacity 1:  [{"status":"ENROLLED"},{"status":"ENROLLED"}]  enrolled: ['b']
+F2 waiter drops:               {"status":"DROPPED","promoted":["b"]}            state: enrolled [], waitlist []
+```
+
+**Changes made:**
+- `src/enrollment-service.ts`: the mutex now comes from a registry keyed by store and offering ID,
+  shared by all instances; `create()` runs under that lock (this also closes a race between two
+  concurrent `create()` calls). Waiter eligibility is fetched only when a seat is open or the call
+  is a drop releasing a seat. `drop` no longer looks up the requester's own record.
+- `src/offering.ts`: `drop` validates the ID, then removes a waitlisted requester **before** the
+  promotion pass (finding 2, with my edit).
+- `src/store.ts`: `removeLearner()` on the in-memory directory, for the unknown-waiter test.
+- `package.json`: `build` renamed to `typecheck`. (Earlier entries mention `npm run build`; that is
+  the same command under its old name.)
+- `tests/`: 9 new tests (8 edge cases in `enrollment-service.test.ts`, the two-instance race in
+  `concurrency.test.ts`), and the mixed concurrency test now asserts every result and the exact
+  final order.
+- `DESIGN.md`: §2 lookup rule, I3 wording, §6 drop ordering and its consequence, §7 shared lock,
+  §8 tradeoff row. `README.md`: completed, with a limitations section and the scope justification.
+
+**Mistakes the AI made during this step, caught by the tests or by itself:**
+- **Its first fix for finding 3 was wrong.** It treated "the requester holds a seat" as "a seat may
+  open", which is only true for `drop`. The new test *"does not need waiters' records while the
+  offering is full"* failed (`lookup failed for l2` on `enroll("l1")`). Fixed by passing whether
+  the operation releases a seat.
+- **Its own earlier test had a wrong comment.** The mixed concurrency test said `drop("l5")` makes
+  l5 leave the waitlist, but l5 has already been promoted by then, so it is a normal drop. The
+  count-only assertion passed by coincidence, which is exactly the weakness the reviewer flagged.
+  Now every result and the exact final order are asserted.
+
+**Verification:**
+- `npm test`: 56 passed (3 files). `npm run typecheck`: clean.
+- **Regression tests fail on the old code** (each fix temporarily reverted, then restored):
+  ```
+  old per-instance lock → "shares one lock across service instances": 4 ENROLLED for 1 seat (1 failed)
+  old drop() from commit 505e5ac → both LEFT_WAITLIST tests fail: got DROPPED (2 failed)
+  restored → 56 passed
+  ```
+- A clean copy (no `node_modules`) was set up with `npm ci` to check the README instructions:
+  56 passed, type-check clean, demo runs, `npm audit` 0 vulnerabilities.
+- Candidate check:
+  - Ran `npm test` (56 passed) and `npm run typecheck` (no errors) myself.
+  - Reverted the shared lock myself (`this.mutex = new Mutex();`): the two-instance test failed as
+    expected. Restored the line; all tests passed.
+  - Read `README.md` end to end. The limitations section honestly covers the single-process lock
+    boundary, directory outage risk, `create()` configuration behaviour, indefinite waiters, and
+    lack of notifications; the architecture section explains why the layers are needed despite
+    the small scope. No changes needed.
+  - Read this entry. The decision table accurately records my decisions on all eight findings,
+    including my edit to finding 2, and matches our discussion. The AI's implementation and
+    verification claims above are its own and are backed by the evidence shown and by my two
+    runs; my confirmation here covers the decision record.

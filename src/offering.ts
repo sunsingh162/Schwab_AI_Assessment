@@ -128,27 +128,38 @@ export function enroll(
 }
 
 /**
- * Handles a drop request (DESIGN.md §4, A7). Runs a promotion pass first, and again after an
- * enrolled learner's seat is released.
+ * Handles a drop request (DESIGN.md §4, §6, A7).
+ *
+ * Order matters: the ID is validated first, then a waitlisted learner is removed from the queue
+ * **before** any promotion pass. Otherwise the start-of-call promotion could seat the learner who
+ * is asking to leave and report them as promoted. The promotion pass then runs as usual, and runs
+ * again after an enrolled learner's seat is released.
  */
 export function drop(
   state: OfferingState,
   rawLearnerId: unknown,
   eligibility: EligibilityLookup,
 ): Outcome<DropResult> {
-  const before = promote(state, eligibility);
-  const current = before.state;
-  const changedByPromotion = before.promoted.length > 0;
-  const reply = (result: DropResult): Outcome<DropResult> => ({
-    result,
-    state: current,
-    changed: changedByPromotion,
-  });
-
   const learnerId = normalizeLearnerId(rawLearnerId);
   if (learnerId === undefined) {
-    return reply({ status: "INVALID_REQUEST", reason: "learnerId must be a non-empty string" });
+    const before = promote(state, eligibility);
+    return {
+      result: { status: "INVALID_REQUEST", reason: "learnerId must be a non-empty string" },
+      state: before.state,
+      changed: before.promoted.length > 0,
+    };
   }
+
+  if (state.waitlist.includes(learnerId)) {
+    const left: OfferingState = {
+      ...state,
+      waitlist: state.waitlist.filter((id) => id !== learnerId),
+    };
+    return { result: { status: "LEFT_WAITLIST" }, state: promote(left, eligibility).state, changed: true };
+  }
+
+  const before = promote(state, eligibility);
+  const current = before.state;
 
   if (current.enrolled.includes(learnerId)) {
     const released: OfferingState = {
@@ -163,14 +174,9 @@ export function drop(
     };
   }
 
-  if (current.waitlist.includes(learnerId)) {
-    // Leaving the waitlist opens no seat, so no second promotion pass is needed.
-    return {
-      result: { status: "LEFT_WAITLIST" },
-      state: { ...current, waitlist: current.waitlist.filter((id) => id !== learnerId) },
-      changed: true,
-    };
-  }
-
-  return reply({ status: "NOT_ENROLLED" });
+  return {
+    result: { status: "NOT_ENROLLED" },
+    state: current,
+    changed: before.promoted.length > 0,
+  };
 }

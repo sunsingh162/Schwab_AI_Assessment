@@ -39,10 +39,10 @@ Out of scope: frontend, catalog, payments, identity, multi-term, deployment, dat
 - **Domain (`offering.ts`)** — pure, synchronous functions: given the current state and an
   eligibility check, return a result and the next state. No I/O, so every rule is unit-testable.
 - **Service (`enrollment-service.ts`)** — the public API. Serialises operations on the offering,
-  loads state, **looks up eligibility for the requester and every waitlisted learner up front**
-  (the directory is async, the domain is not), passes the domain a synchronous `isEligible`
-  function, and saves only if the state changed. If a directory lookup fails, the operation fails
-  and nothing is saved.
+  loads state, **looks up eligibility up front** (the directory is async, the domain is not), passes
+  the domain a synchronous `isEligible` function, and saves only if the state changed. It looks up
+  the requester (for `enroll`) and, **only when a seat is open or this call is a drop that releases
+  one**, every waitlisted learner. If a lookup fails, the operation fails and nothing is saved.
 - **Store (`OfferingStore`)** — async interface, as a real database would be. The in-memory
   implementation returns copies so callers cannot mutate stored state by accident.
 
@@ -92,15 +92,17 @@ Checked after every operation (tests assert these explicitly):
 |---|---|
 | I1 | `enrolled.length ≤ capacity` |
 | I2 | No learner appears twice in `enrolled`, twice in `waitlist`, or in both. |
-| I3 | Waitlist order is join order. Entries are only removed, never reordered or re-inserted. |
+| I3 | Waitlist order is join order. Existing entries are never reordered and nobody is inserted ahead of an existing entry; new joiners (including a learner who dropped and enrolls again) are appended at the back. |
 | I4 | Every enrolled learner was eligible at the moment they were enrolled or promoted. |
 | I5 | **No idle seat while an eligible learner waits:** after an operation completes, if `enrolled.length < capacity`, nobody on the waitlist is currently eligible. |
 | I6 | A rejected request (`ALREADY_*`, `PREREQUISITE_NOT_MET`, `LEARNER_NOT_FOUND`, `INVALID_REQUEST`, `NOT_ENROLLED`) makes **no change of its own**. The only change that can accompany it is the pending promotion described in §6. |
 
 ## 6. Waitlist promotion rule
 
-`promote(state)` runs **at the start of every `enroll` and `drop` call** (before the request is
-handled) and again **after a successful drop**:
+`promote(state)` runs **at the start of every `enroll` and `drop` call** and again **after an
+enrolled learner's seat is released**. One ordering exception: for `drop`, the ID is validated and
+a **waitlisted requester is removed from the queue before** the promotion pass, so a learner who
+asks to leave is never seated by that same call.
 
 ```
 while enrolled.length < capacity:
@@ -119,6 +121,8 @@ Consequences, stated so they are tested rather than accidental:
 - If a waitlisted learner calls `enroll` after becoming eligible while a seat is open, the
   start-of-call promotion moves them into the seat, and they receive `ALREADY_ENROLLED`.
   (The seat was granted by promotion, not by this request.)
+- If a waitlisted learner calls `drop` at a moment when the promotion pass would seat them, they
+  receive `LEFT_WAITLIST` (not `DROPPED`), and the seat goes to the next eligible waiter.
 - Promotions caused by a start-of-call pass are saved even if the request itself is rejected.
   This is the only exception to I6, and the promoted learners are visible in `snapshot()`.
 
@@ -128,6 +132,9 @@ Consequences, stated so they are tested rather than accidental:
   `await` points (both read "1 seat left", both enroll → overbooking).
 - The service therefore holds a **per-offering mutex** (a promise chain) around the whole
   *load → decide → save* sequence. Operations on the offering run one at a time, in arrival order.
+  The mutex is keyed by store and offering ID and **shared by every service instance** in the
+  process, so two instances for the same offering cannot overwrite each other. `create()` runs
+  under the same lock.
 - The domain step is pure and the save happens only on success, so a failed operation cannot leave
   partial state (I6).
 - A real database would replace the mutex with a transaction plus a row lock or optimistic version
@@ -141,4 +148,5 @@ Consequences, stated so they are tested rather than accidental:
 | Re-check eligibility at promotion (A2) | Records can change while waiting. | One directory lookup per waiter scanned. |
 | Return results, don't throw | Clear, exhaustive outcomes; callers can't forget a case (TypeScript discriminated union). | Slightly more verbose types. |
 | Pure domain + thin async service | Rules are testable without timing; concurrency is isolated in one place. | Two layers instead of one class. |
-| In-process mutex | Simplest correct option with an in-memory store. | Doesn't protect multiple processes; a database transaction would be needed then (see §7). |
+| In-process mutex, shared per offering | Simplest correct option with an in-memory store. | Doesn't protect multiple processes; a database transaction would be needed then (see §7). |
+| Look up waiters only when a seat can open | A full offering does not depend on waiters' records. | When a seat can open, one failing waiter lookup fails the request (nothing is saved). |

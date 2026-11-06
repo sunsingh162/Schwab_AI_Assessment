@@ -48,6 +48,11 @@ export class InMemoryLearnerDirectory implements LearnerDirectory {
     this.records.set(learnerId, new Set(courses));
   }
 
+  /** Removes a learner's record, so later lookups report them as unknown. */
+  removeLearner(learnerId: LearnerId): void {
+    this.records.delete(learnerId);
+  }
+
   async completedCourses(learnerId: LearnerId): Promise<ReadonlySet<string> | undefined> {
     await tick();
     const courses = this.records.get(learnerId);

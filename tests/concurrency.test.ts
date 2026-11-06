@@ -6,6 +6,7 @@
  * between load and save, the way they would against a real database.
  */
 import { describe, expect, it } from "vitest";
+import { EnrollmentService } from "../src/index.js";
 import { eligibleLearners, expectInvariants, setup } from "./helpers.js";
 
 describe("concurrent requests", () => {
@@ -70,25 +71,50 @@ describe("concurrent requests", () => {
     expect(state.waitlist).toEqual(["l3"]);
   });
 
-  it("keeps every learner accounted for under a mix of concurrent enrolls and drops", async () => {
+  it("applies a mix of concurrent enrolls and drops exactly as if run one by one in arrival order", async () => {
     const { service, directory } = await setup(3, eligibleLearners("l", 12));
-    for (let i = 1; i <= 8; i++) await service.enroll(`l${i}`); // 3 enrolled, 5 waiting
+    for (let i = 1; i <= 8; i++) await service.enroll(`l${i}`); // enrolled l1-l3, waiting l4-l8
 
-    await Promise.all([
-      service.drop("l1"),
-      service.enroll("l9"),
-      service.drop("l2"),
-      service.enroll("l10"),
-      service.drop("l5"), // leaves the waitlist
-      service.enroll("l11"),
-      service.drop("l1"), // repeated
-      service.enroll("l12"),
+    const results = await Promise.all([
+      service.drop("l1"), // l4 promoted
+      service.enroll("l9"), // waitlisted
+      service.drop("l2"), // l5 promoted
+      service.enroll("l10"), // waitlisted
+      service.drop("l5"), // l5 was promoted above, so this is a normal drop: l6 promoted
+      service.enroll("l11"), // waitlisted
+      service.drop("l1"), // repeated drop
+      service.enroll("l12"), // waitlisted
     ]);
 
+    expect(results).toEqual([
+      { status: "DROPPED", promoted: ["l4"] },
+      { status: "WAITLISTED", position: 5 },
+      { status: "DROPPED", promoted: ["l5"] },
+      { status: "WAITLISTED", position: 5 },
+      { status: "DROPPED", promoted: ["l6"] },
+      { status: "WAITLISTED", position: 5 },
+      { status: "NOT_ENROLLED" },
+      { status: "WAITLISTED", position: 6 },
+    ]);
     const state = await expectInvariants(service, directory);
-    expect(state.enrolled).toHaveLength(3);
-    // 12 learners joined; l1, l2 dropped and l5 left the waitlist, so 9 remain in total.
-    expect(state.enrolled.length + state.waitlist.length).toBe(9);
-    expect([...state.enrolled, ...state.waitlist]).not.toContain("l1");
+    expect(state.enrolled).toEqual(["l3", "l4", "l6"]);
+    expect(state.waitlist).toEqual(["l7", "l8", "l9", "l10", "l11", "l12"]);
+  });
+
+  it("shares one lock across service instances for the same offering (no lost updates)", async () => {
+    const { store, directory } = await setup(1, eligibleLearners("l", 20));
+    const config = { offeringId: "CS201", capacity: 1, prerequisites: ["CS101"] };
+    const instances = await Promise.all(
+      Array.from({ length: 4 }, () => EnrollmentService.create(store, directory, config)),
+    );
+    const ids = Array.from({ length: 20 }, (_, i) => `l${i + 1}`);
+
+    // Spread the racers across the four instances.
+    const results = await Promise.all(ids.map((id, i) => instances[i % 4]!.enroll(id)));
+
+    expect(results.filter((r) => r.status === "ENROLLED")).toHaveLength(1);
+    const state = await expectInvariants(instances[0]!, directory);
+    expect(state.enrolled).toEqual(["l1"]);
+    expect(state.waitlist).toEqual(ids.slice(1)); // nobody told WAITLISTED was lost
   });
 });

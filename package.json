@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "demo": "tsx src/cli.ts",

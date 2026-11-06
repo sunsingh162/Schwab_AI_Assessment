@@ -322,3 +322,122 @@ describe("Service setup", () => {
     expect((await again.snapshot()).enrolled).toEqual(["l1"]);
   });
 });
+
+describe("Edge cases added after independent review (AI_USAGE.md Entry 7)", () => {
+  it("returns LEFT_WAITLIST to a waiter who drops when a promotion pass would have seated them", async () => {
+    const { service, directory } = await track(1, eligibleLearners("l", 2));
+    await service.enroll("l1");
+    await service.enroll("l2");
+    directory.setCompletedCourses("l2", []);
+    await service.drop("l1"); // seat open, l2 skipped and retained
+    directory.setCompletedCourses("l2", [PREREQ]); // l2 would now be promoted by any call
+
+    expect(await service.drop("l2")).toEqual({ status: "LEFT_WAITLIST" });
+
+    const state = await expectInvariants(service, directory);
+    expect(state.enrolled).toEqual([]);
+    expect(state.waitlist).toEqual([]);
+  });
+
+  it("gives the seat to the next eligible waiter when the waiter ahead leaves", async () => {
+    const { service, directory } = await track(1, eligibleLearners("l", 3));
+    for (const id of ["l1", "l2", "l3"]) await service.enroll(id);
+    directory.setCompletedCourses("l2", []);
+    directory.setCompletedCourses("l3", []);
+    await service.drop("l1"); // seat open; l2, l3 both skipped
+    directory.setCompletedCourses("l2", [PREREQ]);
+    directory.setCompletedCourses("l3", [PREREQ]);
+
+    expect(await service.drop("l2")).toEqual({ status: "LEFT_WAITLIST" });
+
+    const state = await expectInvariants(service, directory);
+    expect(state.enrolled).toEqual(["l3"]);
+    expect(state.waitlist).toEqual([]);
+  });
+
+  it("lets an ineligible waiter leave the waitlist", async () => {
+    const { service, directory } = await track(1, eligibleLearners("l", 3));
+    for (const id of ["l1", "l2", "l3"]) await service.enroll(id);
+    directory.setCompletedCourses("l2", []);
+
+    expect(await service.drop("l2")).toEqual({ status: "LEFT_WAITLIST" });
+    expect((await expectInvariants(service, directory)).waitlist).toEqual(["l3"]);
+  });
+
+  it("lists start-of-call and post-drop promotions together in DROPPED.promoted", async () => {
+    const { service, directory } = await track(2, eligibleLearners("l", 4));
+    for (const id of ["l1", "l2", "l3", "l4"]) await service.enroll(id);
+    directory.setCompletedCourses("l3", []);
+    directory.setCompletedCourses("l4", []);
+    await service.drop("l1"); // one seat open; l3, l4 skipped
+    directory.setCompletedCourses("l3", [PREREQ]);
+    directory.setCompletedCourses("l4", [PREREQ]);
+
+    // Start-of-call promotion seats l3; releasing l2's seat then promotes l4.
+    expect(await service.drop("l2")).toEqual({ status: "DROPPED", promoted: ["l3", "l4"] });
+    expect((await expectInvariants(service, directory)).enrolled).toEqual(["l3", "l4"]);
+  });
+
+  it("skips and retains a waiter whose learner record disappears (unknown)", async () => {
+    const { service, directory } = await track(1, eligibleLearners("l", 3));
+    for (const id of ["l1", "l2", "l3"]) await service.enroll(id);
+    directory.removeLearner("l2");
+
+    expect(await service.drop("l1")).toEqual({ status: "DROPPED", promoted: ["l3"] });
+    expect((await expectInvariants(service, directory)).waitlist).toEqual(["l2"]);
+  });
+
+  it("fails a drop cleanly when a waiter's lookup errors, then keeps working", async () => {
+    const { service, directory } = await track(1, eligibleLearners("l", 2));
+    await service.enroll("l1");
+    await service.enroll("l2");
+    const before = await service.snapshot();
+
+    const original = directory.completedCourses.bind(directory);
+    directory.completedCourses = async (id) => {
+      if (id === "l2") throw new Error("lookup failed for l2");
+      return original(id);
+    };
+    await expect(service.drop("l1")).rejects.toThrow("lookup failed for l2");
+    expect(await service.snapshot()).toEqual(before); // seat not released, nobody promoted
+
+    directory.completedCourses = original;
+    expect(await service.drop("l1")).toEqual({ status: "DROPPED", promoted: ["l2"] });
+  });
+
+  it("does not need waiters' records while the offering is full and stays full", async () => {
+    const { service, directory } = await track(1, { ...eligibleLearners("l", 2), newcomer: [PREREQ] });
+    await service.enroll("l1");
+    await service.enroll("l2");
+
+    const original = directory.completedCourses.bind(directory);
+    const looked: string[] = [];
+    directory.completedCourses = async (id) => {
+      looked.push(id);
+      if (id === "l2") throw new Error("lookup failed for l2");
+      return original(id);
+    };
+
+    // A broken waiter record does not block requests that cannot open a seat.
+    expect(await service.enroll("newcomer")).toEqual({ status: "WAITLISTED", position: 2 });
+    expect(await service.enroll("l1")).toEqual({ status: "ALREADY_ENROLLED" });
+    expect(await service.drop("nobody")).toEqual({ status: "NOT_ENROLLED" });
+    expect(looked).toEqual(["newcomer", "l1"]); // requester lookups only, no waiter scans
+
+    directory.completedCourses = original;
+  });
+
+  it("applies the stored offering, not a different config, when create() is called again", async () => {
+    const { store, directory } = await setup(1, eligibleLearners("l", 1));
+
+    const again = await EnrollmentService.create(store, directory, {
+      offeringId: "CS201",
+      capacity: 50,
+      prerequisites: [],
+    });
+
+    const state = await again.snapshot();
+    expect(state.capacity).toBe(1);
+    expect(state.prerequisites).toEqual([PREREQ]);
+  });
+});
