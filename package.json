@@ -1,0 +1,26 @@
+{
+  "name": "course-waitlist",
+  "version": "0.1.0",
+  "description": "Enrollment, drop, and FIFO waitlist promotion for a single course offering (in-memory service).",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunsingh162/Schwab_AI_Assessment.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  }
+}
